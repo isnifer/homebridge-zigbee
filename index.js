@@ -18,23 +18,24 @@ const PLATFORM_NAME = 'ZigBeePlatform'
 const devices = Object.values(requireDir('./lib/devices'))
 
 // Only for beta period
-process.on('uncaughtException', (error) => {
+process.on('uncaughtException', error => {
   console.error('Uncaught Exception', error) // eslint-disable-line no-console
 })
-process.on('unhandledRejection', (reason) => {
+process.on('unhandledRejection', reason => {
   console.error('Unhandled Rejection', reason) // eslint-disable-line no-console
 })
 
-// eslint-disable-next-line one-var, one-var-declaration-per-line
-let Accessory, Service, Characteristic, UUIDGen
+const globals = {}
 
 module.exports = function main(homebridge) {
   addEveTypes(homebridge)
   addSetupTypes(homebridge)
-  Accessory = homebridge.platformAccessory
-  Service = homebridge.hap.Service
-  Characteristic = homebridge.hap.Characteristic
-  UUIDGen = homebridge.hap.uuid
+
+  globals.Accessory = homebridge.platformAccessory
+  globals.Service = homebridge.hap.Service
+  globals.Characteristic = homebridge.hap.Characteristic
+  globals.UUIDGen = homebridge.hap.uuid
+
   homebridge.registerPlatform(PLUGIN_NAME, PLATFORM_NAME, ZigBeePlatform, true)
 }
 
@@ -60,15 +61,31 @@ class ZigBeePlatform {
     this.log('ZigBee platform initialization')
   }
 
+  static recognizeDevice({ model, manufacturer }) {
+    for (const Device of devices) {
+      if (!Device.description) {
+        continue // eslint-disable-line no-continue
+      }
+      if (
+        castArray(Device.description.model).includes(model) &&
+        castArray(Device.description.manufacturer).includes(manufacturer)
+      ) {
+        return Device
+      }
+    }
+
+    return undefined
+  }
+
   handleInitialization() {
     this.startZigBee().catch(this.log)
   }
 
   async startZigBee() {
     zigbee.init({
-      port: this.config.port || await findSerialPort(),
+      port: this.config.port || (await findSerialPort()),
       db: this.config.database || path.join(this.api.user.storagePath(), './zigbee.db'),
-      panId: this.config.panId || 0xFFFF,
+      panId: this.config.panId || 0xffff,
       channel: this.config.channel || 11,
     })
 
@@ -101,7 +118,7 @@ class ZigBeePlatform {
     this.log('error:', error)
   }
 
-  handleZigBeeIndication(message) { // eslint-disable-line consistent-return
+  handleZigBeeIndication(message) {
     switch (message.type) {
       // Supported indication messages
       case 'attReport':
@@ -114,7 +131,7 @@ class ZigBeePlatform {
       case 'devLeaving':
         return this.handleZigBeeDevLeaving(message)
       default:
-        // Do nothing
+        return false
     }
   }
 
@@ -131,7 +148,7 @@ class ZigBeePlatform {
       return this.log('Received message from unknown device:', ieeeAddr)
     }
 
-    device.zigbee.handleIndicationMessage(message)
+    return device.zigbee.handleIndicationMessage(message)
   }
 
   handleZigBeeDevInterview(message) {
@@ -140,8 +157,8 @@ class ZigBeePlatform {
     const cluster = get(message, 'status.endpoint.cluster.current')
     const clusterTotal = get(message, 'status.endpoint.cluster.total')
     this.log(
-      `Join progress: interview endpoint ${endpoint} of ${endpointTotal} `
-      + `and cluster ${cluster} of ${clusterTotal}`
+      `Join progress: interview endpoint ${endpoint} of ${endpointTotal} ` +
+        `and cluster ${cluster} of ${clusterTotal}`
     )
   }
 
@@ -164,7 +181,7 @@ class ZigBeePlatform {
     // Stop permit join
     this.permitJoinAccessory.setPermitJoin(false)
     this.log(`Device announced leaving and is removed, id: ${ieeeAddr}`)
-    const uuid = UUIDGen.generate(ieeeAddr)
+    const uuid = globals.UUIDGen.generate(ieeeAddr)
     const accessory = this.getAccessory(uuid)
     // Sometimes we can unpair device which doesn't exist in HomeKit
     if (accessory) {
@@ -187,11 +204,14 @@ class ZigBeePlatform {
     this.log('firmware revision:', info.firmware.revision)
     this.log('------------------------------------')
     // Set led indicator
-    zigbee.request('UTIL', 'ledControl', {
-      ledid: 3, mode: this.config.disableLed ? 0 : 1,
-    }).catch(() => {
-      /* Unable to set led indicator, may be your device doesn\'t support it */
-    })
+    zigbee
+      .request('UTIL', 'ledControl', {
+        ledid: 3,
+        mode: this.config.disableLed ? 0 : 1,
+      })
+      .catch(() => {
+        /* Unable to set led indicator, may be your device doesn\'t support it */
+      })
     // Init permit join accessory
     this.initPermitJoinAccessory()
     // Init devices
@@ -225,30 +245,15 @@ class ZigBeePlatform {
     this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory])
   }
 
-  recognizeDevice({ model, manufacturer }) {
-    for (const Device of devices) {
-      if (!Device.description) {
-        continue // eslint-disable-line no-continue
-      }
-      if (
-        castArray(Device.description.model).includes(model)
-        && castArray(Device.description.manufacturer).includes(manufacturer)
-      ) {
-        return Device
-      }
-    }
-  }
-
   initDevice(data) {
     try {
       const platform = this
       const model = parseModel(data.modelId)
-      const manufacturer = data.manufName
-      const ieeeAddr = data.ieeeAddr
-      const uuid = UUIDGen.generate(ieeeAddr)
+      const { manufName: manufacturer, ieeeAddr } = data
+      const uuid = globals.UUIDGen.generate(ieeeAddr)
       const accessory = this.getAccessory(uuid)
       const log = (...args) => this.log(manufacturer, model, ieeeAddr, ...args)
-      const Device = this.recognizeDevice({ model, manufacturer })
+      const Device = ZigBeePlatform.recognizeDevice({ model, manufacturer })
       const name = get(Device, 'description.name')
 
       if (!Device) {
@@ -263,35 +268,38 @@ class ZigBeePlatform {
         accessory,
         platform,
         log,
-        Accessory,
-        Service,
-        Characteristic,
-        UUIDGen,
+        Accessory: globals.Accessory,
+        Service: globals.Service,
+        Characteristic: globals.Characteristic,
+        UUIDGen: globals.UUIDGen,
       })
 
       this.setDevice(device)
       this.log('Registered device:', ieeeAddr, manufacturer, model)
     } catch (error) {
       this.log(
-        `Unable to initialize device ${data && data.ieeeAddr}, `
-        + 'try to remove it and add it again.\n')
+        `Unable to initialize device ${data && data.ieeeAddr}, ` +
+          'try to remove it and add it again.\n'
+      )
       this.log('Reason:', error)
     }
+
+    return false
   }
 
   initPermitJoinAccessory() {
     const platform = this
-    const uuid = UUIDGen.generate('zigbee:permit-join')
+    const uuid = globals.UUIDGen.generate('zigbee:permit-join')
     const accessory = this.getAccessory(uuid)
     const log = (...args) => this.log('[PermitJoinAccessory]', ...args)
     this.permitJoinAccessory = new PermitJoinAccessory({
       accessory,
       platform,
       log,
-      Accessory,
-      Service,
-      Characteristic,
-      UUIDGen,
+      Accessory: globals.Accessory,
+      Service: globals.Service,
+      Characteristic: globals.Characteristic,
+      UUIDGen: globals.UUIDGen,
     })
   }
 
@@ -304,7 +312,7 @@ class ZigBeePlatform {
     if (device) {
       device.unregister()
       delete this.devices[ieeeAddr]
-      this.removeAccessory(UUIDGen.generate(ieeeAddr))
+      this.removeAccessory(globals.UUIDGen.generate(ieeeAddr))
     }
   }
 
